@@ -1,0 +1,20 @@
+[project]
+name = "nanobot-st"
+version = "0.1.0"
+description = "我的个人 AI 助手（教学渐进重建项目）"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
