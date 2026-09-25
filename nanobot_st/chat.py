@@ -1,9 +1,11 @@
-"""第一次对话：把一个问题发给大模型，拿回回答。"""
+"""和 AI 聊天：带着全部历史的异步对话。"""
 
+import asyncio
 import os
-import sys
 
-from openai import OpenAI
+from openai import AsyncOpenAI
+
+from nanobot_st.session import Session
 
 
 def resolve_model() -> str:
@@ -17,36 +19,53 @@ def resolve_model() -> str:
     return model
 
 
-def make_client() -> OpenAI:
-    """根据环境变量创建 OpenAI 客户端。
+def make_client() -> AsyncOpenAI:
+    """根据环境变量创建异步 OpenAI 客户端。
 
     用到的环境变量（openai SDK 会自动读取，无需手动传参）：
     - OPENAI_API_KEY  密钥
     - OPENAI_BASE_URL 服务地址；不设置就用 OpenAI 官方，
       设置成兼容服务的地址即可使用 DeepSeek、智谱、Ollama 等。
     """
-    return OpenAI()
+    return AsyncOpenAI()
 
 
-def ask_question(client: OpenAI, question: str) -> str:
-    """向 AI 提一个问题，返回回答文本。
+async def chat_turn(client: AsyncOpenAI, session: Session, question: str) -> str:
+    """进行一个对话回合：把提问记入历史 → 带着全部历史请求模型 → 回答也记入历史。
 
-    client:   由调用方传入的客户端——真实运行传 make_client() 的产物，
-              测试时传 FakeClient，这样测试不花钱也不碰网络。
-    question: 用户的问题字符串。
+    client:   由调用方传入的异步客户端（真实运行传 make_client() 的产物，
+              测试时传 FakeClient，不花钱不碰网）。
+    session:  本次对话的会话，历史就存在它身上。
+    question: 用户这一回合的提问。
     """
-    response = client.chat.completions.create(
+    session.add_user(question)
+    response = await client.chat.completions.create(
         model=resolve_model(),
-        messages=[{"role": "user", "content": question}],
+        messages=session.messages,
     )
-    return response.choices[0].message.content
+    answer = response.choices[0].message.content
+    session.add_assistant(answer)
+    return answer
 
 
-def main() -> None:
-    """命令行入口：把命令行参数拼成问题，打印 AI 的回答。"""
-    question = " ".join(sys.argv[1:]).strip() or input("你想问什么？")
-    print(ask_question(make_client(), question))
+async def main() -> None:
+    """终端聊天入口：循环"你一句、我一句"，直到输入 exit 退出。"""
+    client = make_client()
+    session = Session()
+    print("开始聊天吧（输入 exit 退出）")
+    while True:
+        question = input("你：").strip()
+        if not question:
+            continue
+        if question in ("exit", "quit", "退出"):
+            print("下次再聊～")
+            break
+        answer = await chat_turn(client, session, question)
+        print(f"AI：{answer}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, EOFError):
+        print("\n下次再聊～")
