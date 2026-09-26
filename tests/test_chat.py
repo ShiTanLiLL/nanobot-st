@@ -94,15 +94,20 @@ async def test_chat_turn_executes_tool_then_answers(monkeypatch):
     answer = await chat_turn(client, session, "现在几点了？")
 
     assert answer == "现在是 2026-09-25 14:30:00。"
-    # 第 1 次请求：带上了完整的工具菜单（由注册表自动生成）
+    # 第 1 次请求：首条是 system 人设，且带上了完整的工具菜单（由注册表自动生成）
+    first_messages = client.captured_calls[0]["messages"]
+    assert first_messages[0]["role"] == "system"
     tool_names = [t["function"]["name"] for t in client.captured_calls[0]["tools"]]
     assert tool_names == ["get_time", "calculator", "random_number"]
     # 第 2 次请求：历史里带着工具结果——模型"看到"结果，靠的就是这次重发
+    # （序列为 [system, user 问, assistant 便签, tool 结果]）
     second_messages = client.captured_calls[1]["messages"]
-    assert second_messages[2]["role"] == "tool"
-    assert second_messages[2]["tool_call_id"] == "call_1"
-    # 真正的 get_time 确实被执行了：结果是 19 个字符的时间串（YYYY-MM-DD HH:MM:SS）
-    assert len(second_messages[2]["content"]) == 19
+    assert second_messages[2]["role"] == "assistant"
+    assert second_messages[2]["tool_calls"][0]["id"] == "call_1"
+    assert second_messages[3]["role"] == "tool"
+    assert second_messages[3]["tool_call_id"] == "call_1"
+    # 19 字符的时间串（YYYY-MM-DD HH:MM:SS）
+    assert len(second_messages[3]["content"]) == 19
     # 回合结束后的完整历史：问 → 请求调用 → 工具结果 → 最终回答
     assert [m["role"] for m in session.messages] == ["user", "assistant", "tool", "assistant"]
 
@@ -126,12 +131,13 @@ async def test_chat_turn_handles_multiple_tool_calls_in_one_round(monkeypatch):
     assert answer == "12 乘 34 等于 408；骰子掷出了 3。"
     second_messages = client.captured_calls[1]["messages"]
     # 便签里有两次调用，其后跟着两份结果，顺序与配对都正确
-    assert second_messages[1]["tool_calls"][0]["id"] == "call_1"
-    assert second_messages[1]["tool_calls"][1]["id"] == "call_2"
-    assert second_messages[2]["tool_call_id"] == "call_1"
-    assert second_messages[2]["content"] == "408"          # 计算器：确定性结果
-    assert second_messages[3]["tool_call_id"] == "call_2"
-    assert int(second_messages[3]["content"]) in range(1, 7)  # 骰子：1~6 之间
+    # （序列为 [system, user 问, assistant 便签, tool 结果1, tool 结果2]）
+    assert second_messages[2]["tool_calls"][0]["id"] == "call_1"
+    assert second_messages[2]["tool_calls"][1]["id"] == "call_2"
+    assert second_messages[3]["tool_call_id"] == "call_1"
+    assert second_messages[3]["content"] == "408"          # 计算器：确定性结果
+    assert second_messages[4]["tool_call_id"] == "call_2"
+    assert int(second_messages[4]["content"]) in range(1, 7)  # 骰子：1~6 之间
     assert [m["role"] for m in session.messages] == [
         "user", "assistant", "tool", "tool", "assistant",
     ]

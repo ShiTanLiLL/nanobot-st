@@ -5,12 +5,16 @@ import os
 
 from openai import AsyncOpenAI
 
+from nanobot_st.context import ContextBuilder
 from nanobot_st.session import Session
 from nanobot_st.storage import load_session, save_session
 from nanobot_st.tools import REGISTRY
 
 # 一回合内最多让模型要几轮工具：防止异常情况下无限循环白烧钱
 MAX_TOOL_ROUNDS = 10
+
+# 上下文组装器（人设 + 截断），整个程序共用一份
+CONTEXT_BUILDER = ContextBuilder()
 
 
 def resolve_model() -> str:
@@ -45,7 +49,7 @@ async def chat_turn(client: AsyncOpenAI, session: Session, question: str) -> str
     for _ in range(MAX_TOOL_ROUNDS):
         response = await client.chat.completions.create(
             model=resolve_model(),
-            messages=session.messages,
+            messages=CONTEXT_BUILDER.build(session),
             tools=REGISTRY.schemas(),
         )
         choice = response.choices[0]
