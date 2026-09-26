@@ -1,4 +1,4 @@
-"""和 AI 聊天：带着全部历史的异步对话（现在 AI 能用工具了）。"""
+"""和 AI 聊天：流式对话引擎——边生成边输出，工具循环照旧。"""
 
 import asyncio
 import os
@@ -39,49 +39,99 @@ def make_client() -> AsyncOpenAI:
     return AsyncOpenAI()
 
 
-async def chat_turn(client: AsyncOpenAI, session: Session, question: str) -> str:
-    """进行一个对话回合（其中可能包含多轮工具调用）。
+async def request_model(
+    client: AsyncOpenAI, messages: list[dict], on_content_delta=None
+) -> dict:
+    """发起一次流式请求，把各式各样的流式块聚合成统一结果。
 
-    工具循环（agent 的心脏）：
-    请求模型 → 模型要工具就执行并把结果回填、再请求模型 → 直到给出最终回答。
+    流式响应像挤牙膏：文本一小段一小段地来（delta），工具调用的
+    参数也是一小片一小片地来。本函数边收边做两件事：
+    1. 文本增量随手通过回调 on_content_delta(片段) 交出去（打字机效果靠它）；
+    2. 把碎片拼回完整的东西，最后返回统一结果：
+       {"finish_reason": ..., "content": 完整文本, "tool_calls": [标准 dict 信封]}
+    """
+    stream = await client.chat.completions.create(
+        model=resolve_model(),
+        messages=messages,
+        tools=REGISTRY.schemas(),
+        stream=True,
+    )
+    content_parts: list[str] = []
+    tool_calls_acc: dict[int, dict] = {}  # 工具调用暂存间：index → 碎片累积
+    finish_reason = None
+    async for chunk in stream:
+        if not chunk.choices:
+            continue  # 个别服务会发一个没有正文的空块
+        choice = chunk.choices[0]
+        delta = choice.delta
+        piece = delta.content
+        if piece:
+            content_parts.append(piece)
+            if on_content_delta:
+                on_content_delta(piece)
+        for tc in delta.tool_calls or []:
+            slot = tool_calls_acc.setdefault(
+                tc.index, {"id": "", "name": "", "arguments": ""}
+            )
+            if tc.id:
+                slot["id"] = tc.id
+            if tc.function and tc.function.name:
+                slot["name"] = tc.function.name
+            if tc.function and tc.function.arguments:
+                slot["arguments"] += tc.function.arguments
+        if choice.finish_reason:
+            finish_reason = choice.finish_reason
+    tool_calls = [
+        {
+            "id": slot["id"],
+            "type": "function",
+            "function": {"name": slot["name"], "arguments": slot["arguments"]},
+        }
+        for _, slot in sorted(tool_calls_acc.items())
+    ]
+    return {
+        "finish_reason": finish_reason,
+        "content": "".join(content_parts),
+        "tool_calls": tool_calls,
+    }
+
+
+async def chat_turn(
+    client: AsyncOpenAI, session: Session, question: str, on_content_delta=None
+) -> str:
+    """进行一个对话回合（可能含多轮工具调用），返回最终回答文本。
+
+    on_content_delta: 可选回调，模型每吐出一段文字就调用它一次（打字机效果）。
     """
     session.add_user(question)
     for _ in range(MAX_TOOL_ROUNDS):
-        response = await client.chat.completions.create(
-            model=resolve_model(),
-            messages=CONTEXT_BUILDER.build(session),
-            tools=REGISTRY.schemas(),
+        result = await request_model(
+            client, CONTEXT_BUILDER.build(session), on_content_delta=on_content_delta
         )
-        choice = response.choices[0]
-        if choice.finish_reason == "tool_calls":
-            # 第一步：把"AI 请求调用工具"原样记入历史
-            #（SDK 给的是对象，先转成标准 dict 信封，历史里存的都是信封）
-            tool_calls = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
-                    },
-                }
-                for tc in choice.message.tool_calls
-            ]
-            session.add_assistant_tool_calls(tool_calls)
-            # 第二步：逐个执行工具，把每份结果也记入历史（分发交给注册表）
-            for tc in tool_calls:
-                result = REGISTRY.execute(tc["function"]["name"], tc["function"]["arguments"])
-                session.add_tool_result(tc["id"], tc["function"]["name"], result)
-            # 第三步：带着工具结果把全部历史再发给模型，看它还有什么要说的
+        if result["finish_reason"] == "tool_calls":
+            # 把"AI 请求调用工具"记入历史（request_model 已聚合成标准信封）
+            session.add_assistant_tool_calls(result["tool_calls"])
+            # 逐个执行工具，结果记入历史（分发交给注册表）
+            for tc in result["tool_calls"]:
+                tool_result = REGISTRY.execute(
+                    tc["function"]["name"], tc["function"]["arguments"]
+                )
+                session.add_tool_result(tc["id"], tc["function"]["name"], tool_result)
+            # 带着工具结果把全部历史再发给模型，看它还有什么要说的
             continue
-        # finish_reason == "stop"：模型给出最终文本回答，回合结束
-        session.add_assistant(choice.message.content)
-        return choice.message.content
+        # finish_reason == "stop"：最终文本回答，回合结束
+        session.add_assistant(result["content"])
+        return result["content"]
     raise RuntimeError(f"模型连续 {MAX_TOOL_ROUNDS} 轮请求工具，已强制停止本回合")
 
 
+def print_delta(text: str) -> None:
+    """流式打印回调：拿到一小段就立刻打出来（end='' 不换行，flush=True 立刻刷新）。"""
+    print(text, end="", flush=True)
+
+
 async def main() -> None:
-    """终端聊天入口：启动时恢复上次会话，每回合落盘，重启不失忆。"""
+    """终端聊天入口：启动恢复会话，回答逐字打出，每回合落盘。"""
     client = make_client()
     session = load_session("default") or Session("default")
     if session.messages:
@@ -95,9 +145,10 @@ async def main() -> None:
         if question in ("exit", "quit", "退出"):
             print("下次再聊～（对话已保存）")
             break
-        answer = await chat_turn(client, session, question)
+        print("AI：", end="", flush=True)
+        await chat_turn(client, session, question, on_content_delta=print_delta)
+        print()  # 打字机已逐字输出完毕，这里只补一个换行收尾
         save_session(session)
-        print(f"AI：{answer}")
 
 
 if __name__ == "__main__":
