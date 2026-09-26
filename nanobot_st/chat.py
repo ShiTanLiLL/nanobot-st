@@ -1,4 +1,4 @@
-"""和 AI 聊天：带着全部历史的异步对话。"""
+"""和 AI 聊天：带着全部历史的异步对话（现在 AI 能用工具了）。"""
 
 import asyncio
 import os
@@ -6,6 +6,10 @@ import os
 from openai import AsyncOpenAI
 
 from nanobot_st.session import Session
+from nanobot_st.tools import TOOLS, execute_tool
+
+# 一回合内最多让模型要几轮工具：防止异常情况下无限循环白烧钱
+MAX_TOOL_ROUNDS = 10
 
 
 def resolve_model() -> str:
@@ -31,21 +35,44 @@ def make_client() -> AsyncOpenAI:
 
 
 async def chat_turn(client: AsyncOpenAI, session: Session, question: str) -> str:
-    """进行一个对话回合：把提问记入历史 → 带着全部历史请求模型 → 回答也记入历史。
+    """进行一个对话回合（其中可能包含多轮工具调用）。
 
-    client:   由调用方传入的异步客户端（真实运行传 make_client() 的产物，
-              测试时传 FakeClient，不花钱不碰网）。
-    session:  本次对话的会话，历史就存在它身上。
-    question: 用户这一回合的提问。
+    工具循环（agent 的心脏）：
+    请求模型 → 模型要工具就执行并把结果回填、再请求模型 → 直到给出最终回答。
     """
     session.add_user(question)
-    response = await client.chat.completions.create(
-        model=resolve_model(),
-        messages=session.messages,
-    )
-    answer = response.choices[0].message.content
-    session.add_assistant(answer)
-    return answer
+    for _ in range(MAX_TOOL_ROUNDS):
+        response = await client.chat.completions.create(
+            model=resolve_model(),
+            messages=session.messages,
+            tools=TOOLS,
+        )
+        choice = response.choices[0]
+        if choice.finish_reason == "tool_calls":
+            # 第一步：把"AI 请求调用工具"原样记入历史
+            #（SDK 给的是对象，先转成标准 dict 信封，历史里存的都是信封）
+            tool_calls = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in choice.message.tool_calls
+            ]
+            session.add_assistant_tool_calls(tool_calls)
+            # 第二步：逐个执行工具，把每份结果也记入历史
+            for tc in tool_calls:
+                result = execute_tool(tc["function"]["name"], tc["function"]["arguments"])
+                session.add_tool_result(tc["id"], tc["function"]["name"], result)
+            # 第三步：带着工具结果把全部历史再发给模型，看它还有什么要说的
+            continue
+        # finish_reason == "stop"：模型给出最终文本回答，回合结束
+        session.add_assistant(choice.message.content)
+        return choice.message.content
+    raise RuntimeError(f"模型连续 {MAX_TOOL_ROUNDS} 轮请求工具，已强制停止本回合")
 
 
 async def main() -> None:
