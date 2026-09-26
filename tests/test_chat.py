@@ -1,8 +1,7 @@
-"""第 3 课测试：用假客户端验证"带工具的对话回合"。"""
+"""第 4 课测试：用假客户端验证"带工具的对话回合"（工具来自注册表）。"""
 
 from nanobot_st.chat import chat_turn
 from nanobot_st.session import Session
-from nanobot_st.tools import GET_TIME_SCHEMA
 
 
 class FakeClient:
@@ -95,8 +94,9 @@ async def test_chat_turn_executes_tool_then_answers(monkeypatch):
     answer = await chat_turn(client, session, "现在几点了？")
 
     assert answer == "现在是 2026-09-25 14:30:00。"
-    # 第 1 次请求：带上了工具菜单
-    assert client.captured_calls[0]["tools"] == [GET_TIME_SCHEMA]
+    # 第 1 次请求：带上了完整的工具菜单（由注册表自动生成）
+    tool_names = [t["function"]["name"] for t in client.captured_calls[0]["tools"]]
+    assert tool_names == ["get_time", "calculator", "random_number"]
     # 第 2 次请求：历史里带着工具结果——模型"看到"结果，靠的就是这次重发
     second_messages = client.captured_calls[1]["messages"]
     assert second_messages[2]["role"] == "tool"
@@ -105,6 +105,36 @@ async def test_chat_turn_executes_tool_then_answers(monkeypatch):
     assert len(second_messages[2]["content"]) == 19
     # 回合结束后的完整历史：问 → 请求调用 → 工具结果 → 最终回答
     assert [m["role"] for m in session.messages] == ["user", "assistant", "tool", "assistant"]
+
+
+async def test_chat_turn_handles_multiple_tool_calls_in_one_round(monkeypatch):
+    """验证一轮两只手：模型同时要 calculator 和 random_number，两个都执行、按序回填。"""
+    monkeypatch.setenv("NANOBOT_ST_MODEL", "fake-model")
+    client = FakeClient(scripted=[
+        {"finish_reason": "tool_calls", "tool_calls": [
+            {"id": "call_1", "name": "calculator",
+             "arguments": '{"a": 12, "b": 34, "operator": "*"}'},
+            {"id": "call_2", "name": "random_number",
+             "arguments": '{"minimum": 1, "maximum": 6}'},
+        ]},
+        {"finish_reason": "stop", "content": "12 乘 34 等于 408；骰子掷出了 3。"},
+    ])
+    session = Session()
+
+    answer = await chat_turn(client, session, "算一下 12*34，再掷一个骰子")
+
+    assert answer == "12 乘 34 等于 408；骰子掷出了 3。"
+    second_messages = client.captured_calls[1]["messages"]
+    # 便签里有两次调用，其后跟着两份结果，顺序与配对都正确
+    assert second_messages[1]["tool_calls"][0]["id"] == "call_1"
+    assert second_messages[1]["tool_calls"][1]["id"] == "call_2"
+    assert second_messages[2]["tool_call_id"] == "call_1"
+    assert second_messages[2]["content"] == "408"          # 计算器：确定性结果
+    assert second_messages[3]["tool_call_id"] == "call_2"
+    assert int(second_messages[3]["content"]) in range(1, 7)  # 骰子：1~6 之间
+    assert [m["role"] for m in session.messages] == [
+        "user", "assistant", "tool", "tool", "assistant",
+    ]
 
 
 async def test_chat_turn_plain_answer_without_tools(monkeypatch):

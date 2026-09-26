@@ -6,7 +6,7 @@ import os
 from openai import AsyncOpenAI
 
 from nanobot_st.session import Session
-from nanobot_st.tools import TOOLS, execute_tool
+from nanobot_st.tools import REGISTRY
 
 # 一回合内最多让模型要几轮工具：防止异常情况下无限循环白烧钱
 MAX_TOOL_ROUNDS = 10
@@ -45,7 +45,7 @@ async def chat_turn(client: AsyncOpenAI, session: Session, question: str) -> str
         response = await client.chat.completions.create(
             model=resolve_model(),
             messages=session.messages,
-            tools=TOOLS,
+            tools=REGISTRY.schemas(),
         )
         choice = response.choices[0]
         if choice.finish_reason == "tool_calls":
@@ -63,9 +63,9 @@ async def chat_turn(client: AsyncOpenAI, session: Session, question: str) -> str
                 for tc in choice.message.tool_calls
             ]
             session.add_assistant_tool_calls(tool_calls)
-            # 第二步：逐个执行工具，把每份结果也记入历史
+            # 第二步：逐个执行工具，把每份结果也记入历史（分发交给注册表）
             for tc in tool_calls:
-                result = execute_tool(tc["function"]["name"], tc["function"]["arguments"])
+                result = REGISTRY.execute(tc["function"]["name"], tc["function"]["arguments"])
                 session.add_tool_result(tc["id"], tc["function"]["name"], result)
             # 第三步：带着工具结果把全部历史再发给模型，看它还有什么要说的
             continue
