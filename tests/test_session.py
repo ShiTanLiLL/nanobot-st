@@ -16,5 +16,8 @@ def test_session_records_dialogue_in_order():
 
 
 def test_session_starts_empty():
-    """验证：新会话的历史从空列表开始——干净的开场。"""
-    assert Session().messages == []
+    """验证：新会话从空历史开始，有默认名字与诞生时间。"""
+    session = Session()
+    assert session.messages == []
+    assert session.name == "default"
+    assert session.created_at  # ISO 时间串非空

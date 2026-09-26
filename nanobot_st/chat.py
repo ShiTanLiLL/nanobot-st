@@ -6,6 +6,7 @@ import os
 from openai import AsyncOpenAI
 
 from nanobot_st.session import Session
+from nanobot_st.storage import load_session, save_session
 from nanobot_st.tools import REGISTRY
 
 # 一回合内最多让模型要几轮工具：防止异常情况下无限循环白烧钱
@@ -76,18 +77,22 @@ async def chat_turn(client: AsyncOpenAI, session: Session, question: str) -> str
 
 
 async def main() -> None:
-    """终端聊天入口：循环"你一句、我一句"，直到输入 exit 退出。"""
+    """终端聊天入口：启动时恢复上次会话，每回合落盘，重启不失忆。"""
     client = make_client()
-    session = Session()
-    print("开始聊天吧（输入 exit 退出）")
+    session = load_session("default") or Session("default")
+    if session.messages:
+        print(f"已恢复上次对话（{len(session.messages)} 条历史），继续聊（输入 exit 退出）")
+    else:
+        print("开始新的对话（输入 exit 退出）")
     while True:
         question = input("你：").strip()
         if not question:
             continue
         if question in ("exit", "quit", "退出"):
-            print("下次再聊～")
+            print("下次再聊～（对话已保存）")
             break
         answer = await chat_turn(client, session, question)
+        save_session(session)
         print(f"AI：{answer}")
 
 
